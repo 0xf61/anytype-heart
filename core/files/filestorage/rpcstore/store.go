@@ -11,7 +11,6 @@ import (
 	"github.com/anyproto/any-sync/commonfile/fileblockstore"
 	"github.com/anyproto/any-sync/commonfile/fileproto"
 	"github.com/anyproto/any-sync/commonfile/fileproto/fileprotoerr"
-	"github.com/anyproto/any-sync/net"
 	"github.com/anyproto/any-sync/net/peer"
 	"github.com/anyproto/any-sync/net/pool"
 	"github.com/anyproto/any-sync/net/rpc/rpcerr"
@@ -67,8 +66,8 @@ type RpcStore interface {
 
 const (
 	getManyWorkers   = 4
-	localPeerTimeout = time.Second
-	localPeerBanTTL  = 5 * time.Minute
+	localPeerTimeout = 8 * time.Second
+	localPeerBanTTL  = 30 * time.Second
 )
 
 // reservedCallTimeout bounds a single doNodeReserved RPC. The reserved
@@ -90,7 +89,6 @@ type store struct {
 
 	bannedMu       sync.Mutex
 	bannedLocalMap map[string]time.Time
-
 }
 
 func newStore(pool pool.Pool, peerStore peerstore.PeerStore) *store {
@@ -202,10 +200,29 @@ func (s *store) resetReservedConnLocked() {
 }
 
 // Get retrieves a block, trying local peers first then falling back to the node peer.
+//
+// On flaky VPN/overlay links a single BlockGet to a local (P2P) peer can fail
+// transiently; that is fine — the cloud file node is the authoritative fallback
+// and always has the block. We deliberately do NOT retry the local peer in a
+// tight loop and do NOT close the peer on failure:
+//
+//   - Closing the peer (MultiConn) would tear down the whole QUIC/yamux session
+//     and kill every concurrent block fetch sharing that peer (GetMany runs 4
+//     workers, and several images are typically loaded at once). One bad block
+//     would take the rest down with it — the root cause of images "flapping"
+//     (disappearing and reappearing) on lossy links.
+//   - A bad sub-stream is already evicted by the drpc sub-connection pool:
+//     ReleaseDrpcConn drops closed conns, so the next AcquireDrpcConn opens a
+//     fresh sub-conn on the same live MultiConn. No manual Close() is needed.
+//   - Retrying on every error (including format.ErrNotFound when the peer simply
+//     doesn't have the block) used to hammer the peer 20 times before falling
+//     back to the node, which both thrashed the connection and stalled the UI.
 func (s *store) Get(ctx context.Context, k cid.Cid) (blocks.Block, error) {
 	spaceId := fileblockstore.CtxGetSpaceId(ctx)
 	data, err := s.getFromLocalPeers(ctx, spaceId, k)
 	if err != nil {
+		log.Debug("get: local peer miss, falling back to node",
+			zap.String("cid", k.String()), zap.String("spaceId", spaceId), zap.Error(err))
 		data, err = s.getFromNodePeer(ctx, spaceId, k)
 	}
 	if err != nil {
@@ -223,13 +240,24 @@ func (s *store) getFromLocalPeers(ctx context.Context, spaceId string, k cid.Cid
 	defer cancel()
 	p, err := s.pool.GetOneOf(localCtx, localPeerIds)
 	if err != nil {
+		// Every candidate peer was unreachable. Ban them briefly so the next
+		// block fetch doesn't burn another full dial timeout on the same dead
+		// peers and falls back to the node fast instead. net.ErrUnableToConnect
+		// is the sentinel pool.GetOneOf returns when the whole walk fails; it
+		// never comes out of getBlock below.
+		for _, id := range localPeerIds {
+			s.banLocalPeer(id)
+		}
 		return nil, fmt.Errorf("get local peer: %w", err)
 	}
 	data, err := s.getBlock(localCtx, p, spaceId, k, false)
 	if err != nil {
-		if errors.Is(err, net.ErrUnableToConnect) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			s.banLocalPeer(p.Id())
-		}
+		// Do NOT close p and do NOT ban it here. A failed/missing BlockGet is
+		// not a sign the peer is down: format.ErrNotFound means the peer is
+		// healthy but doesn't have this block, and a stream/deadline/cancel
+		// error is confined to this sub-connection, which the drpc pool evicts
+		// automatically on release. Closing the MultiConn would nuke every
+		// other concurrent fetch sharing the peer and cause image flapping.
 		return nil, err
 	}
 	return data, nil
