@@ -35,11 +35,9 @@ Kontrol: `go version && bun --version && command -v npx`
 #    varsayılan olarak ../anytype-ts hedefine kurar — CLIENT_DESKTOP_PATH)
 git clone https://github.com/0xf61/anytype-heart.git   # kişisel fork (origin)
 cd anytype-heart
-git remote add upstream https://github.com/anyproto/anytype-heart.git
 git checkout GO-3192-l3-ttl                            # PR #2357 ile eşleşen branch (aşağıya bakın)
 cd ..
 git clone https://github.com/alicangnll/anytype-ts.git # kişisel fork (origin) = PR #2357
-cd anytype-ts && git remote add upstream https://github.com/anyproto/anytype-ts.git
 
 # 2. Kurulu Anytype uygulaması /Applications/Anytype.app konumunda olmalı.
 #    (deploy.go --app-path ile başka konum belirtilebilir)
