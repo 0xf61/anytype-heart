@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	anystore "github.com/anyproto/any-store"
 	"github.com/anyproto/any-sync/app"
@@ -143,6 +144,30 @@ func (c *Config) AutoDownloadSizeLimitMb() int64 {
 	return c.persisted.AutoDownloadSizeLimitMb
 }
 
+// LocalPeerTimeout returns the per-request timeout for fetching file blocks
+// from local peers. Falls back to the default when unset (0) or invalid.
+func (c *Config) LocalPeerTimeout() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	ms := c.persisted.LocalPeerTimeoutMs
+	if ms <= 0 {
+		ms = DefaultLocalPeerTimeoutMs
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+// LocalPeerBanTtl returns how long an unreachable local peer is skipped
+// after a failed block fetch. Falls back to the default when unset (0) or invalid.
+func (c *Config) LocalPeerBanTtl() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	sec := c.persisted.LocalPeerBanTtlSec
+	if sec <= 0 {
+		sec = DefaultLocalPeerBanTtlSec
+	}
+	return time.Duration(sec) * time.Second
+}
+
 // Setters for persisted config fields (write to disk on change)
 
 // writeLocked writes the current persisted config to disk.
@@ -152,6 +177,17 @@ func (c *Config) writeLocked() error {
 		return nil
 	}
 	return writeConfigSafe(c.configPath, c.persisted)
+}
+
+// loadPersistedLocked loads conf into memory and, when local-peer knobs were
+// missing from an older config.json, persists their defaults so users can
+// discover and tune them. Must be called with c.mu held.
+func (c *Config) loadPersistedLocked(conf PersistedConfig) error {
+	c.persisted = conf
+	if !c.persisted.applyLocalPeerDefaults() {
+		return nil
+	}
+	return c.writeLocked()
 }
 
 // SetNetworkId sets the network id and writes to disk if changed.
@@ -376,10 +412,14 @@ func (c *Config) initFromFileAndEnv(repoPath string) error {
 		// Get the in-memory legacy file store path before loading from file
 		inMemoryLegacyPath := c.persisted.LegacyFileStorePath
 
-		// Load persisted config into memory
+		// Load persisted config into memory, materializing local-peer defaults
+		// into config.json on first run so they are visible and tunable
 		c.mu.Lock()
-		c.persisted = confRequired
+		err = c.loadPersistedLocked(confRequired)
 		c.mu.Unlock()
+		if err != nil {
+			return fmt.Errorf("load persisted config: %w", err)
+		}
 
 		// Do not overwrite the legacy file store path from file if it's already set in memory
 		if confRequired.LegacyFileStorePath == "" && inMemoryLegacyPath != "" {

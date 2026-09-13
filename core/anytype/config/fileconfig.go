@@ -10,15 +10,43 @@ import (
 
 var ErrInvalidConfigFormat = errors.New("failed to decode")
 
+// Defaults for local (LAN/VPN) peer file-block fetching, materialized into
+// config.json on first run so users can discover and tune them. The 1s
+// timeout assumes LAN latency; routed L3 VPNs (OpenVPN, NetBird, WireGuard)
+// often have 300-900ms RTT, where handshake + RPC needs several seconds —
+// raise LocalPeerTimeoutMs there (and optionally lower the ban TTL).
+const (
+	DefaultLocalPeerTimeoutMs = 1000
+	DefaultLocalPeerBanTtlSec = 300
+)
+
 // PersistedConfig contains configuration that is persisted to config.json
 type PersistedConfig struct {
-	HostAddr               string `json:",omitempty"`
-	CustomFileStorePath    string `json:",omitempty"`
-	LegacyFileStorePath    string `json:",omitempty"`
-	NetworkId              string `json:""` // in case this account was at least once connected to the network on this device, this field will be set to the network id
-	AutoDownloadFiles      bool   `json:",omitempty"`
-	AutoDownloadOnWifiOnly bool   `json:",omitempty"`
-	AutoDownloadSizeLimitMb int64 `json:",omitempty"` // 0=no limit, >0=max file size in mebibytes
+	HostAddr                string `json:",omitempty"`
+	CustomFileStorePath     string `json:",omitempty"`
+	LegacyFileStorePath     string `json:",omitempty"`
+	NetworkId               string `json:""` // in case this account was at least once connected to the network on this device, this field will be set to the network id
+	AutoDownloadFiles       bool   `json:",omitempty"`
+	AutoDownloadOnWifiOnly  bool   `json:",omitempty"`
+	AutoDownloadSizeLimitMb int64  `json:",omitempty"` // 0=no limit, >0=max file size in mebibytes
+	LocalPeerTimeoutMs      int    `json:",omitempty"` // per-request timeout for fetching file blocks from local peers; 0=DefaultLocalPeerTimeoutMs
+	LocalPeerBanTtlSec      int    `json:",omitempty"` // how long an unreachable local peer is skipped after a failed fetch; 0=DefaultLocalPeerBanTtlSec
+}
+
+// applyLocalPeerDefaults fills zero values with the defaults and reports
+// whether anything changed (so the caller can persist them to config.json,
+// making the knobs visible for manual tuning).
+func (c *PersistedConfig) applyLocalPeerDefaults() bool {
+	changed := false
+	if c.LocalPeerTimeoutMs <= 0 {
+		c.LocalPeerTimeoutMs = DefaultLocalPeerTimeoutMs
+		changed = true
+	}
+	if c.LocalPeerBanTtlSec <= 0 {
+		c.LocalPeerBanTtlSec = DefaultLocalPeerBanTtlSec
+		changed = true
+	}
+	return changed
 }
 
 // writeConfigSafe writes config to disk using atomic rename for crash safety.

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -287,6 +288,64 @@ func TestConfigGetters(t *testing.T) {
 	assert.Equal(t, "/ip4/0.0.0.0/tcp/4006", cfg.HostAddr())
 	assert.True(t, cfg.AutoDownloadFiles())
 	assert.False(t, cfg.AutoDownloadOnWifiOnly())
+}
+
+func TestLocalPeerDefaults(t *testing.T) {
+	t.Run("empty config gets defaults and reports change", func(t *testing.T) {
+		cfg := PersistedConfig{}
+		assert.True(t, cfg.applyLocalPeerDefaults())
+		assert.Equal(t, DefaultLocalPeerTimeoutMs, cfg.LocalPeerTimeoutMs)
+		assert.Equal(t, DefaultLocalPeerBanTtlSec, cfg.LocalPeerBanTtlSec)
+
+		// second application is a no-op
+		assert.False(t, cfg.applyLocalPeerDefaults())
+	})
+
+	t.Run("user values are kept", func(t *testing.T) {
+		cfg := PersistedConfig{LocalPeerTimeoutMs: 10000, LocalPeerBanTtlSec: 60}
+		assert.False(t, cfg.applyLocalPeerDefaults())
+		assert.Equal(t, 10000, cfg.LocalPeerTimeoutMs)
+		assert.Equal(t, 60, cfg.LocalPeerBanTtlSec)
+	})
+}
+
+func TestLocalPeerGetters(t *testing.T) {
+	cfg := New(DisableFileConfig(true))
+
+	// unset values fall back to the LAN defaults
+	assert.Equal(t, time.Duration(DefaultLocalPeerTimeoutMs)*time.Millisecond, cfg.LocalPeerTimeout())
+	assert.Equal(t, time.Duration(DefaultLocalPeerBanTtlSec)*time.Second, cfg.LocalPeerBanTtl())
+
+	// custom values are honored (what an L3 VPN user would set)
+	cfg.persisted.LocalPeerTimeoutMs = 10000
+	cfg.persisted.LocalPeerBanTtlSec = 60
+	assert.Equal(t, 10*time.Second, cfg.LocalPeerTimeout())
+	assert.Equal(t, time.Minute, cfg.LocalPeerBanTtl())
+}
+
+func TestLoadPersistedLocked_MaterializesDefaultsToFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+
+	// an old config.json without the local-peer knobs
+	require.NoError(t, writeConfigSafe(configPath, PersistedConfig{NetworkId: "net"}))
+
+	cfg := New()
+	cfg.RepoPath = tmpDir
+	cfg.configPath = configPath
+
+	cfg.mu.Lock()
+	err := cfg.loadPersistedLocked(PersistedConfig{NetworkId: "net"})
+	cfg.mu.Unlock()
+	require.NoError(t, err)
+
+	// the knobs must now be visible in config.json for manual tuning
+	var onDisk PersistedConfig
+	raw, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(raw, &onDisk))
+	assert.Equal(t, DefaultLocalPeerTimeoutMs, onDisk.LocalPeerTimeoutMs)
+	assert.Equal(t, DefaultLocalPeerBanTtlSec, onDisk.LocalPeerBanTtlSec)
 }
 
 func TestConfigDisableFileConfig(t *testing.T) {
