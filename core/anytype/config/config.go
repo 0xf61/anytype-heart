@@ -418,7 +418,7 @@ func (c *Config) initFromFileAndEnv(repoPath string) error {
 		err = c.loadPersistedLocked(confRequired)
 		c.mu.Unlock()
 		if err != nil {
-			return err
+			return fmt.Errorf("load persisted config: %w", err)
 		}
 
 		// Do not overwrite the legacy file store path from file if it's already set in memory
